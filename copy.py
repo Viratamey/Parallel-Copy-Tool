@@ -5,6 +5,7 @@ import queue
 import psutil
 import tkinter as tk
 from tkinter import ttk, messagebox
+import time
 
 # -------- Configuration --------
 SOURCE_DIR = r'<SOURCE_DIRECTORY>'
@@ -18,6 +19,7 @@ total_files = 0
 copied_files = 0
 pause_event = threading.Event()
 cancel_event = threading.Event()
+start_time = None
 
 # Track thread-specific status messages
 thread_status = {}
@@ -96,6 +98,8 @@ def update_ui():
                 text=f"{current}/{total_files} files copied ({percent:.1f}%)"
             )
             progress_bar['value'] = percent
+            elapsed = time.time() - start_time if start_time else 0
+            elapsed_label.config(text=f"Elapsed Time: {int(elapsed)}s")
             root.title(f"File Copier – {percent:.1f}% Complete")
 
         with thread_status_lock:
@@ -114,6 +118,8 @@ def finalize_ui():
         text=f"{copied_files}/{total_files} files copied (100%)"
     )
     progress_bar['value'] = 100
+    elapsed = time.time() - start_time if start_time else 0
+    elapsed_label.config(text=f"Elapsed Time: {int(elapsed)}s")
     root.title("File Copier – 100% Complete")
     status_label.config(text="Copy completed!")
     start_button.config(state=tk.NORMAL)
@@ -124,8 +130,9 @@ def finalize_ui():
 
 # -------- Button Actions --------
 def start_copy():
-    global copied_files
+    global copied_files, start_time
     copied_files = 0
+    start_time = time.time()
 
     if not os.path.exists(SOURCE_DIR) or not os.path.exists(DEST_DIR):
         messagebox.showerror("Error", "Please set valid SOURCE_DIR and DEST_DIR.")
@@ -183,6 +190,7 @@ def cancel_copy():
     status_label.config(text="Cancelling...")
     progress_bar['value'] = 0
     percent_label.config(text="0/0 files copied (0%)")
+    elapsed_label.config(text="Elapsed Time: 0s")
     start_button.config(state=tk.NORMAL)
     pause_button.config(state=tk.DISABLED)
     resume_button.config(state=tk.DISABLED)
@@ -192,7 +200,7 @@ def cancel_copy():
 # -------- GUI Setup --------
 root = tk.Tk()
 root.title("File Copier")
-root.geometry("600x400")
+root.geometry("600x420")
 root.resizable(False, False)
 
 frame = ttk.Frame(root, padding=10)
@@ -205,6 +213,9 @@ progress_bar.pack(pady=5)
 
 percent_label = ttk.Label(frame, text="0/0 files copied (0%)", font=("Segoe UI", 10))
 percent_label.pack()
+
+elapsed_label = ttk.Label(frame, text="Elapsed Time: 0s", font=("Segoe UI", 10))
+elapsed_label.pack(pady=2)
 
 status_label = ttk.Label(frame, text="Status: Waiting", font=("Segoe UI", 10), justify="left")
 status_label.pack(pady=5)
