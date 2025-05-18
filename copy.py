@@ -7,20 +7,18 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import time
 
-# -------- Configuration --------
-ESTIMATED_AVG_FILE_SIZE = 500 * 1024 * 1024  # 500 MB average for better thread count estimation
-
 # -------- Globals --------
+SOURCE_DIR = ""
+DEST_DIR = ""
+ESTIMATED_AVG_FILE_SIZE = 500 * 1024 * 1024  # 500 MB average for thread estimation
+
 file_queue = queue.Queue()
 progress_queue = queue.Queue()
 total_files = 0
 copied_files = 0
-total_bytes_copied = 0
 pause_event = threading.Event()
 cancel_event = threading.Event()
-start_time = None
 
-# Track thread-specific status messages
 thread_status = {}
 thread_status_lock = threading.Lock()
 
@@ -30,20 +28,28 @@ def get_available_memory():
 
 def estimate_thread_count():
     available_mem = get_available_memory()
-    return max(1, min(8, available_mem // ESTIMATED_AVG_FILE_SIZE))  # Limit to 8 threads for large files
+    return max(1, min(8, available_mem // ESTIMATED_AVG_FILE_SIZE))
 
-def populate_file_queue(source_dir):
+def populate_file_queue():
     global total_files
-    for root_dir, dirs, files in os.walk(source_dir):
+    for root, dirs, files in os.walk(SOURCE_DIR):
         for file in files:
-            full_path = os.path.join(root_dir, file)
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, SOURCE_DIR)
+            dest_path = os.path.join(DEST_DIR, rel_path)
+            if os.path.exists(dest_path):
+                try:
+                    if os.path.getsize(full_path) == os.path.getsize(dest_path):
+                        continue  # Skip if same size exists
+                except:
+                    continue
             file_queue.put(full_path)
     total_files = file_queue.qsize()
 
 # -------- Copy Worker --------
-def copy_worker(source_dir, dest_dir):
-    global copied_files, total_bytes_copied
-    buffer_size = 4 * 1024 * 1024  # 4 MB buffer for faster large file transfer
+def copy_worker():
+    global copied_files
+    buffer_size = 4 * 1024 * 1024
     thread_name = threading.current_thread().name
 
     while not cancel_event.is_set():
@@ -54,8 +60,8 @@ def copy_worker(source_dir, dest_dir):
         except queue.Empty:
             break
 
-        rel_path = os.path.relpath(src_file, source_dir)
-        dest_file = os.path.join(dest_dir, rel_path)
+        rel_path = os.path.relpath(src_file, SOURCE_DIR)
+        dest_file = os.path.join(DEST_DIR, rel_path)
         os.makedirs(os.path.dirname(dest_file), exist_ok=True)
 
         try:
@@ -70,14 +76,13 @@ def copy_worker(source_dir, dest_dir):
                         break
                     dst.write(chunk)
                     copied_size += len(chunk)
-
+                    percent = (copied_size / total_size) * 100 if total_size else 100
                     with thread_status_lock:
-                        thread_status[thread_name] = f"{os.path.basename(src_file)} – {copied_size // (1024 * 1024)}MB/{total_size // (1024 * 1024)}MB"
+                        thread_status[thread_name] = f"{os.path.basename(src_file)} – {percent:.1f}%"
 
             shutil.copystat(src_file, dest_file)
-            total_bytes_copied += copied_size
 
-        except Exception as e:
+        except Exception:
             with thread_status_lock:
                 thread_status[thread_name] = f"Error: {os.path.basename(src_file)}"
         finally:
@@ -88,37 +93,18 @@ def copy_worker(source_dir, dest_dir):
             file_queue.task_done()
 
 # -------- UI Update --------
-def format_time(seconds):
-    mins, secs = divmod(int(seconds), 60)
-    hrs, mins = divmod(mins, 60)
-    return f"{hrs:02}:{mins:02}:{secs:02}"
-
 def update_ui():
     try:
         while not progress_queue.empty():
             current = progress_queue.get_nowait()
             percent = (current / total_files) * 100 if total_files else 0
-            percent_label.config(
-                text=f"{current}/{total_files} files copied ({percent:.1f}%)"
-            )
+            percent_label.config(text=f"{current}/{total_files} files copied ({percent:.1f}%)")
             progress_bar['value'] = percent
-
-        elapsed = time.time() - start_time if start_time else 0
-        elapsed_label.config(text=f"Elapsed Time: {format_time(elapsed)}")
-
-        if copied_files > 0 and start_time:
-            estimated_total = (elapsed / copied_files) * total_files
-            remaining = estimated_total - elapsed
-            remaining_label.config(text=f"Estimated Remaining: {format_time(remaining)}")
-            speed = total_bytes_copied / elapsed if elapsed else 0
-            speed_label.config(text=f"Speed: {speed / (1024 * 1024):.2f} MB/s")
-        else:
-            remaining_label.config(text="Estimated Remaining: --:--:--")
-            speed_label.config(text="Speed: -- MB/s")
+            root.title(f"File Copier – {percent:.1f}% Complete")
 
         with thread_status_lock:
-            status_lines = [f"{k}: {v}" for k, v in sorted(thread_status.items())]
-        status_label.config(text="\n".join(status_lines[:10]))
+            lines = [f"{k}: {v}" for k, v in sorted(thread_status.items())]
+        status_label.config(text="\n".join(lines[:10]))
 
     except Exception as e:
         print("UI update error:", e)
@@ -128,14 +114,8 @@ def update_ui():
 
 # -------- Finalize UI --------
 def finalize_ui():
-    percent_label.config(
-        text=f"{copied_files}/{total_files} files copied (100%)"
-    )
+    percent_label.config(text=f"{copied_files}/{total_files} files copied (100%)")
     progress_bar['value'] = 100
-    elapsed = time.time() - start_time if start_time else 0
-    elapsed_label.config(text=f"Elapsed Time: {format_time(elapsed)}")
-    remaining_label.config(text="Estimated Remaining: 00:00:00")
-    speed_label.config(text="Speed: -- MB/s")
     root.title("File Copier – 100% Complete")
     status_label.config(text="Copy completed!")
     start_button.config(state=tk.NORMAL)
@@ -145,27 +125,12 @@ def finalize_ui():
     messagebox.showinfo("Done", "All files copied successfully!")
 
 # -------- Button Actions --------
-def browse_source():
-    directory = filedialog.askdirectory(title="Select Source Directory")
-    if directory:
-        source_dir_var.set(directory)
-
-def browse_dest():
-    directory = filedialog.askdirectory(title="Select Destination Directory")
-    if directory:
-        dest_dir_var.set(directory)
-
 def start_copy():
-    global copied_files, start_time, total_bytes_copied, total_files
+    global copied_files, SOURCE_DIR, DEST_DIR
     copied_files = 0
-    total_bytes_copied = 0
-    start_time = time.time()
 
-    source_dir = source_dir_var.get()
-    dest_dir = dest_dir_var.get()
-
-    if not os.path.exists(source_dir) or not os.path.exists(dest_dir):
-        messagebox.showerror("Error", "Please select valid source and destination directories.")
+    if not SOURCE_DIR or not DEST_DIR or not os.path.exists(SOURCE_DIR) or not os.path.exists(DEST_DIR):
+        messagebox.showerror("Error", "Please select valid source and destination folders.")
         return
 
     start_button.config(state=tk.DISABLED)
@@ -176,13 +141,9 @@ def start_copy():
     cancel_event.clear()
     pause_event.set()
 
-    populate_file_queue(source_dir)
+    populate_file_queue()
     if total_files == 0:
         messagebox.showinfo("Info", "No files to copy.")
-        start_button.config(state=tk.NORMAL)
-        pause_button.config(state=tk.DISABLED)
-        resume_button.config(state=tk.DISABLED)
-        cancel_button.config(state=tk.DISABLED)
         return
 
     status_label.config(text=f"Starting... {total_files} files found")
@@ -193,7 +154,7 @@ def start_copy():
         name = f"Worker-{i+1}"
         with thread_status_lock:
             thread_status[name] = "Waiting..."
-        t = threading.Thread(target=copy_worker, args=(source_dir, dest_dir), daemon=True, name=name)
+        t = threading.Thread(target=copy_worker, daemon=True, name=name)
         t.start()
         threads.append(t)
 
@@ -224,71 +185,102 @@ def cancel_copy():
     status_label.config(text="Cancelling...")
     progress_bar['value'] = 0
     percent_label.config(text="0/0 files copied (0%)")
-    elapsed_label.config(text="Elapsed Time: 00:00:00")
-    remaining_label.config(text="Estimated Remaining: --:--:--")
-    speed_label.config(text="Speed: -- MB/s")
     start_button.config(state=tk.NORMAL)
     pause_button.config(state=tk.DISABLED)
     resume_button.config(state=tk.DISABLED)
     cancel_button.config(state=tk.DISABLED)
     root.title("File Copier – Cancelled")
 
+def select_source():
+    global SOURCE_DIR
+    folder = filedialog.askdirectory()
+    if folder:
+        SOURCE_DIR = folder
+        source_label.config(text=f"Source: {SOURCE_DIR}")
+
+def select_dest():
+    global DEST_DIR
+    folder = filedialog.askdirectory()
+    if folder:
+        DEST_DIR = folder
+        dest_label.config(text=f"Destination: {DEST_DIR}")
+
+# -------- Monitor Destination --------
+def monitor_destination():
+    while True:
+        if not cancel_event.is_set():
+            if DEST_DIR and os.path.exists(DEST_DIR):
+                if not pause_event.is_set() and not start_button['state'] == tk.NORMAL:
+                    pause_event.set()
+                    root.after(0, lambda: status_label.config(text="Resumed after network reconnect."))
+            else:
+                if pause_event.is_set():
+                    pause_event.clear()
+                    root.after(0, lambda: status_label.config(text="Network disconnected. Waiting to reconnect..."))
+        time.sleep(3)
+
 # -------- GUI Setup --------
 root = tk.Tk()
 root.title("File Copier")
-root.geometry("600x500")
+root.geometry("650x450")
 root.resizable(False, False)
-
-source_dir_var = tk.StringVar()
-dest_dir_var = tk.StringVar()
 
 frame = ttk.Frame(root, padding=10)
 frame.pack(fill=tk.BOTH, expand=True)
 
-source_frame = ttk.Frame(frame)
-source_frame.pack(fill=tk.X, pady=5)
-ttk.Label(source_frame, text="Source Directory:").pack(side=tk.LEFT)
-ttk.Entry(source_frame, textvariable=source_dir_var, width=40).pack(side=tk.LEFT, padx=5)
-ttk.Button(source_frame, text="Browse", command=browse_source).pack(side=tk.LEFT)
+ttk.Label(frame, text="Parallel File Copier", font=("Segoe UI", 14)).pack(pady=5)
 
-dest_frame = ttk.Frame(frame)
-dest_frame.pack(fill=tk.X, pady=5)
-ttk.Label(dest_frame, text="Destination Directory:").pack(side=tk.LEFT)
-ttk.Entry(dest_frame, textvariable=dest_dir_var, width=40).pack(side=tk.LEFT, padx=5)
-ttk.Button(dest_frame, text="Browse", command=browse_dest).pack(side=tk.LEFT)
+source_btn = ttk.Button(frame, text="Select Source Folder", command=select_source)
+source_btn.pack(pady=2)
 
-progress_bar = ttk.Progressbar(frame, length=500)
+source_label = ttk.Label(frame, text="Source: Not selected", font=("Segoe UI", 9), foreground="gray")
+source_label.pack()
+
+dest_btn = ttk.Button(frame, text="Select Destination Folder", command=select_dest)
+dest_btn.pack(pady=2)
+
+dest_label = ttk.Label(frame, text="Destination: Not selected", font=("Segoe UI", 9), foreground="gray")
+dest_label.pack()
+
+progress_bar = ttk.Progressbar(frame, orient="horizontal", length=550, mode="determinate")
 progress_bar.pack(pady=10)
 
 percent_label = ttk.Label(frame, text="0/0 files copied (0%)", font=("Segoe UI", 10))
 percent_label.pack()
 
-elapsed_label = ttk.Label(frame, text="Elapsed Time: 00:00:00", font=("Segoe UI", 10))
-elapsed_label.pack()
-
-remaining_label = ttk.Label(frame, text="Estimated Remaining: --:--:--", font=("Segoe UI", 10))
-remaining_label.pack()
-
-speed_label = ttk.Label(frame, text="Speed: -- MB/s", font=("Segoe UI", 10))
-speed_label.pack()
-
-status_label = ttk.Label(frame, text="Status: Idle", font=("Segoe UI", 10), anchor="w", justify="left")
-status_label.pack(fill=tk.X, pady=5)
+status_label = ttk.Label(frame, text="Status: Waiting", font=("Segoe UI", 10), justify="left")
+status_label.pack(pady=5)
 
 button_frame = ttk.Frame(frame)
-button_frame.pack(pady=10)
+button_frame.pack(pady=15, fill=tk.X)
 
-start_button = ttk.Button(button_frame, text="Start Copy", command=start_copy)
-start_button.pack(side=tk.LEFT, padx=5)
+buttons = {
+    "Start": (start_copy, "start_button"),
+    "Pause": (pause_copy, "pause_button"),
+    "Resume": (resume_copy, "resume_button"),
+    "Cancel": (cancel_copy, "cancel_button"),
+}
 
-pause_button = ttk.Button(button_frame, text="Pause", command=pause_copy, state=tk.DISABLED)
-pause_button.pack(side=tk.LEFT, padx=5)
+button_widgets = {}
+for i, (label, (command, varname)) in enumerate(buttons.items()):
+    btn = ttk.Button(button_frame, text=label, command=command)
+    btn.grid(row=0, column=i, padx=10, ipadx=10, sticky="ew")
+    button_widgets[varname] = btn
 
-resume_button = ttk.Button(button_frame, text="Resume", command=resume_copy, state=tk.DISABLED)
-resume_button.pack(side=tk.LEFT, padx=5)
+start_button = button_widgets["start_button"]
+pause_button = button_widgets["pause_button"]
+resume_button = button_widgets["resume_button"]
+cancel_button = button_widgets["cancel_button"]
 
-cancel_button = ttk.Button(button_frame, text="Cancel", command=cancel_copy, state=tk.DISABLED)
-cancel_button.pack(side=tk.LEFT, padx=5)
+pause_button.config(state=tk.DISABLED)
+resume_button.config(state=tk.DISABLED)
+cancel_button.config(state=tk.DISABLED)
+
+for i in range(len(buttons)):
+    button_frame.columnconfigure(i, weight=1)
+
+# Start monitor thread
+monitor_thread = threading.Thread(target=monitor_destination, daemon=True)
+monitor_thread.start()
 
 root.mainloop()
-
