@@ -10,6 +10,7 @@ import time
 # -------- Globals --------
 SOURCE_DIR = ""
 DEST_DIR = ""
+DEST_DIR_FULL = ""
 ESTIMATED_AVG_FILE_SIZE = 500 * 1024 * 1024  # 500 MB average for thread estimation
 
 file_queue = queue.Queue()
@@ -30,13 +31,13 @@ def estimate_thread_count():
     available_mem = get_available_memory()
     return max(1, min(8, available_mem // ESTIMATED_AVG_FILE_SIZE))
 
-def populate_file_queue():
+def populate_file_queue(dest_dir):
     global total_files
     for root, dirs, files in os.walk(SOURCE_DIR):
         for file in files:
             full_path = os.path.join(root, file)
             rel_path = os.path.relpath(full_path, SOURCE_DIR)
-            dest_path = os.path.join(DEST_DIR, rel_path)
+            dest_path = os.path.join(dest_dir, rel_path)
             if os.path.exists(dest_path):
                 try:
                     if os.path.getsize(full_path) == os.path.getsize(dest_path):
@@ -61,7 +62,7 @@ def copy_worker():
             break
 
         rel_path = os.path.relpath(src_file, SOURCE_DIR)
-        dest_file = os.path.join(DEST_DIR, rel_path)
+        dest_file = os.path.join(DEST_DIR_FULL, rel_path)
         os.makedirs(os.path.dirname(dest_file), exist_ok=True)
 
         try:
@@ -126,12 +127,16 @@ def finalize_ui():
 
 # -------- Button Actions --------
 def start_copy():
-    global copied_files, SOURCE_DIR, DEST_DIR
+    global copied_files, DEST_DIR_FULL
     copied_files = 0
 
     if not SOURCE_DIR or not DEST_DIR or not os.path.exists(SOURCE_DIR) or not os.path.exists(DEST_DIR):
         messagebox.showerror("Error", "Please select valid source and destination folders.")
         return
+
+    source_basename = os.path.basename(SOURCE_DIR.rstrip("/\\"))
+    DEST_DIR_FULL = os.path.join(DEST_DIR, source_basename)
+    os.makedirs(DEST_DIR_FULL, exist_ok=True)
 
     start_button.config(state=tk.DISABLED)
     pause_button.config(state=tk.NORMAL)
@@ -141,7 +146,7 @@ def start_copy():
     cancel_event.clear()
     pause_event.set()
 
-    populate_file_queue()
+    populate_file_queue(DEST_DIR_FULL)
     if total_files == 0:
         messagebox.showinfo("Info", "No files to copy.")
         return
